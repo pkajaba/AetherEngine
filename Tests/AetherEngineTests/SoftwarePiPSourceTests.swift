@@ -1,4 +1,7 @@
 import AVFoundation
+#if canImport(AVKit) && os(macOS)
+@preconcurrency import AVKit
+#endif
 import Testing
 import CoreMedia
 @testable import AetherEngine
@@ -97,11 +100,15 @@ struct SoftwarePiPTransportTests {
         var value: Int { lock.lock(); defer { lock.unlock() }; return n }
     }
 
-    @Test("delegate callbacks through a real controller: skip completes once, no content is invalid")
+    /// Evaluated off the main actor by the trait, so it asks AVKit directly.
+    nonisolated static let pipSupported = AVPictureInPictureController.isPictureInPictureSupported()
+
+    @Test("delegate callbacks through a real controller: skip completes once, no content is invalid",
+          .enabled(if: SoftwarePiPTransportTests.pipSupported, "PiP is not supported on this host"))
     func delegateThroughController() async throws {
         let engine = try AetherEngine()
         let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
-        guard let controller = source.makePictureInPictureController() else { return }
+        let controller = try #require(source.makePictureInPictureController())
         let delegate = source.playbackDelegate
         #expect(delegate.pictureInPictureControllerIsPlaybackPaused(controller))
         #expect(delegate.pictureInPictureControllerTimeRangeForPlayback(controller).start == .negativeInfinity)
@@ -119,11 +126,71 @@ struct SoftwarePiPTransportTests {
         #expect(done.value == 2)
 
         let orphan = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: try AetherEngine())
-        guard let orphanController = orphan.makePictureInPictureController() else { return }
+        let orphanController = try #require(orphan.makePictureInPictureController())
         let orphanDelegate = orphan.playbackDelegate
         // Engine of `orphan` is released once the temporary above is gone.
         #expect(orphanDelegate.pictureInPictureControllerIsPlaybackPaused(orphanController))
         #expect(!orphanDelegate.pictureInPictureControllerTimeRangeForPlayback(orphanController).isValid)
+    }
+
+    private final class Answers: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: (paused: Bool, range: CMTimeRange)?
+        func set(paused: Bool, range: CMTimeRange) { lock.lock(); stored = (paused, range); lock.unlock() }
+        var value: (paused: Bool, range: CMTimeRange)? { lock.lock(); defer { lock.unlock() }; return stored }
+    }
+
+    @Test("delegate getters answer from a background queue while the main thread is busy",
+          .enabled(if: SoftwarePiPTransportTests.pipSupported, "PiP is not supported on this host"))
+    func gettersOffMainDoNotBlock() throws {
+        let engine = try AetherEngine()
+        let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
+        let controller = try #require(source.makePictureInPictureController())
+        let delegate = source.playbackDelegate
+
+        let answers = Answers()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            delegate.pictureInPictureController(controller, setPlaying: false)
+            answers.set(
+                paused: delegate.pictureInPictureControllerIsPlaybackPaused(controller),
+                range: delegate.pictureInPictureControllerTimeRangeForPlayback(controller))
+            finished.signal()
+        }
+        // This test runs on the main thread and holds it here: a getter that waited on main would
+        // never finish inside the budget.
+        let outcome = finished.wait(timeout: .now() + 5)
+        #expect(outcome == .success)
+        let result = try #require(answers.value)
+        #expect(result.paused)
+        #expect(result.range.start == .negativeInfinity)
+    }
+
+    @Test("state and duration changes invalidate quietly, and a released source is not retained",
+          .enabled(if: SoftwarePiPTransportTests.pipSupported, "PiP is not supported on this host"))
+    func invalidationPathReleases() async throws {
+        let engine = try AetherEngine()
+        weak var weakSource: SoftwarePiPSource?
+        do {
+            var source: SoftwarePiPSource? = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
+            weakSource = source
+            var controller = try #require(source?.makePictureInPictureController())
+            engine.state = .paused
+            engine.duration = 600
+            await Task.yield()
+            await Task.yield()
+            #expect(source?.isPaused == true)
+            #expect(abs((source?.timeRange().duration.seconds ?? 0) - 600) < 0.001)
+            _ = controller
+            controller = try #require(source?.makePictureInPictureController())
+            _ = controller
+            source = nil
+        }
+        engine.state = .playing
+        engine.duration = 700
+        await Task.yield()
+        await Task.yield()
+        #expect(weakSource == nil)
     }
     #endif
 }

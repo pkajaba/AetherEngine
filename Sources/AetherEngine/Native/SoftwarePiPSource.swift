@@ -1,20 +1,30 @@
 import AVFoundation
 import Combine
 import CoreMedia
+import os
 #if canImport(AVKit)
 import AVKit
 #endif
 
 /// SW-PiP bridge (Sodalite SW-PiP Phase A): everything a host needs to build an
 /// AVPictureInPictureController ContentSource around the software path. The layer and the transport
-/// answers are plain engine state; `makePictureInPictureController()` is the one place AVKit is
-/// touched, and it is optional. The analog of `currentAVPlayer` for sample-buffer PiP: the layer plus the four transport
-/// answers backing AVPictureInPictureSampleBufferPlaybackDelegate. Time answers live here because
-/// the enqueued frames' PTS axis (source axis, synchronizer clock) is engine knowledge.
+/// answers are plain engine state; AVKit is touched only by the optional controller helpers below.
+/// The analog of `currentAVPlayer` for sample-buffer PiP: the layer plus the four transport answers
+/// backing AVPictureInPictureSampleBufferPlaybackDelegate. Time answers live here because the
+/// enqueued frames' PTS axis (source axis, synchronizer clock) is engine knowledge.
 @MainActor
 public final class SoftwarePiPSource {
+    /// The two transport answers the PiP window polls, copied out of the main actor so a delegate
+    /// callback on another thread can answer without waiting for main.
+    struct Snapshot: Sendable {
+        var isPaused: Bool
+        var range: CMTimeRange
+    }
+
     public let layer: AVSampleBufferDisplayLayer
     let isLive: Bool
+    /// Last values computed on the main actor. Read off main by the playback delegate.
+    nonisolated let snapshot = OSAllocatedUnfairLock(initialState: Snapshot(isPaused: true, range: .invalid))
     private weak var engine: AetherEngine?
     #if canImport(AVKit) && !os(watchOS)
     private weak var controller: AVPictureInPictureController?
@@ -25,22 +35,37 @@ public final class SoftwarePiPSource {
         self.layer = layer
         self.isLive = isLive
         self.engine = engine
+        refreshSnapshot()
+    }
+
+    /// Recompute the transport answers from the engine and publish them to `snapshot`.
+    @discardableResult
+    func refreshSnapshot() -> Snapshot {
+        let fresh: Snapshot
+        if let engine {
+            fresh = Snapshot(
+                isPaused: engine.state != .playing,
+                range: AetherEngine.softwarePiPTimeRange(
+                    isLive: isLive,
+                    sourceTime: engine.sourceTime,
+                    currentTime: engine.currentTime,
+                    duration: engine.duration
+                )
+            )
+        } else {
+            // No engine means no content to describe, which is not the same as a live source.
+            fresh = Snapshot(isPaused: true, range: .invalid)
+        }
+        snapshot.withLock { $0 = fresh }
+        return fresh
     }
 
     /// Playable range on the enqueued frames' PTS axis (source axis). Live sources report an
     /// indefinite range so the window shows live UI. `.invalid` when the engine is gone: there is
     /// no content to describe, which is not the same as a live source.
-    public func timeRange() -> CMTimeRange {
-        guard let engine else { return .invalid }
-        return AetherEngine.softwarePiPTimeRange(
-            isLive: isLive,
-            sourceTime: engine.sourceTime,
-            currentTime: engine.currentTime,
-            duration: engine.duration
-        )
-    }
+    public func timeRange() -> CMTimeRange { refreshSnapshot().range }
 
-    public var isPaused: Bool { engine?.state != .playing }
+    public var isPaused: Bool { refreshSnapshot().isPaused }
 
     public func setPlaying(_ playing: Bool) {
         if playing { engine?.play() } else { engine?.pause() }
@@ -75,11 +100,12 @@ public final class SoftwarePiPSource {
     public static var isSupported: Bool { AVPictureInPictureController.isPictureInPictureSupported() }
 
     /// A ready `AVPictureInPictureController` for this session's display layer, or nil when PiP is
-    /// not supported on this device. A reload replaces `AetherEngine.softwarePiPSource` and the content
-    /// source holds its delegate weakly, so rebuild the controller on every source change. The engine's
-    /// state and duration changes invalidate the window's play/pause and timeline. The host keeps the controller, sets its delegate and calls
-    /// `startPictureInPicture()`; it must also set `AetherEngine.pictureInPictureActive` from the
-    /// controller's will-start / did-stop callbacks. tvOS AVKit accepts the source but does not
+    /// not supported on this device. A reload replaces `AetherEngine.softwarePiPSource` and the
+    /// content source holds its delegate weakly, so rebuild the controller on every source change.
+    /// When `state` or `duration` changes, the source invalidates the playback state of the
+    /// controller it made (the latest one). The host keeps the controller, sets its delegate and
+    /// calls `startPictureInPicture()`; it must also set `AetherEngine.pictureInPictureActive` from
+    /// the controller's will-start / did-stop callbacks. tvOS AVKit accepts the source but does not
     /// present sample-buffer content (README, Picture in Picture).
     public func makePictureInPictureController() -> AVPictureInPictureController? {
         guard Self.isSupported else { return nil }
@@ -90,7 +116,10 @@ public final class SoftwarePiPSource {
         stateCancellables.removeAll()
         if let engine {
             let invalidate: @MainActor () -> Void = { [weak self] in
-                Task { @MainActor in self?.controller?.invalidatePlaybackState() }
+                Task { @MainActor in
+                    self?.refreshSnapshot()
+                    self?.controller?.invalidatePlaybackState()
+                }
             }
             engine.$state.dropFirst().sink { _ in invalidate() }.store(in: &stateCancellables)
             engine.$duration.dropFirst().sink { _ in invalidate() }.store(in: &stateCancellables)
@@ -101,8 +130,9 @@ public final class SoftwarePiPSource {
 }
 
 #if canImport(AVKit) && !os(watchOS)
-/// `AVPictureInPictureSampleBufferPlaybackDelegate` over a `SoftwarePiPSource`. AVKit calls these on
-/// the main thread.
+/// `AVPictureInPictureSampleBufferPlaybackDelegate` over a `SoftwarePiPSource`. AVKit gives these
+/// callbacks no thread contract, and the main thread may be waiting on AVKit itself, so nothing here
+/// blocks on main: on main the live values are read, elsewhere the last published snapshot.
 public final class SoftwarePiPPlaybackDelegate: NSObject, AVPictureInPictureSampleBufferPlaybackDelegate, @unchecked Sendable {
     private weak var source: SoftwarePiPSource?
 
@@ -110,22 +140,24 @@ public final class SoftwarePiPPlaybackDelegate: NSObject, AVPictureInPictureSamp
         self.source = source
     }
 
-    /// AVKit calls on the main thread; answer from the main actor either way rather than trap.
-    private func onMain<T: Sendable>(_ body: @MainActor () -> T) -> T {
-        if Thread.isMainThread { return MainActor.assumeIsolated(body) }
-        return DispatchQueue.main.sync { MainActor.assumeIsolated(body) }
-    }
-
     public func pictureInPictureController(_ controller: AVPictureInPictureController, setPlaying playing: Bool) {
-        onMain { source?.setPlaying(playing) }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { source?.setPlaying(playing) }
+        } else {
+            Task { @MainActor [weak source] in source?.setPlaying(playing) }
+        }
     }
 
     public func pictureInPictureControllerTimeRangeForPlayback(_ controller: AVPictureInPictureController) -> CMTimeRange {
-        onMain { source?.timeRange() ?? .invalid }
+        guard let source else { return .invalid }
+        if Thread.isMainThread { return MainActor.assumeIsolated { source.timeRange() } }
+        return source.snapshot.withLock { $0.range }
     }
 
     public func pictureInPictureControllerIsPlaybackPaused(_ controller: AVPictureInPictureController) -> Bool {
-        onMain { source?.isPaused ?? true }
+        guard let source else { return true }
+        if Thread.isMainThread { return MainActor.assumeIsolated { source.isPaused } }
+        return source.snapshot.withLock { $0.isPaused }
     }
 
     public func pictureInPictureController(_ controller: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {}
