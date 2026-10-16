@@ -35,7 +35,7 @@ struct SoftwarePiPSourceTests {
     }
 }
 
-/// Parity E: the transport answers the PiP window's delegate callbacks map onto.
+/// The transport answers the PiP window's delegate callbacks map onto.
 @Suite("Software PiP transport mapping")
 @MainActor
 struct SoftwarePiPTransportTests {
@@ -59,7 +59,7 @@ struct SoftwarePiPTransportTests {
         #expect(SoftwarePiPSource.skipTarget(isLive: false, currentTime: 100, duration: 0, by: 15) == 115)
     }
 
-    @Test("an idle engine reports paused and an indefinite range, and play/pause map onto its transport")
+    @Test("an idle engine reports paused with an indefinite range, and pause keeps it paused")
     func idleEngine() throws {
         let engine = try AetherEngine()
         let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
@@ -67,27 +67,63 @@ struct SoftwarePiPTransportTests {
         #expect(source.timeRange().start == .negativeInfinity)
         source.setPlaying(false)
         #expect(source.isPaused)
-        source.setPlaying(true)
-        #expect(source.isPaused == (engine.state != .playing))
+        #expect(engine.state != .playing)
     }
 
-    @Test("a released engine degrades to paused and indefinite instead of crashing")
-    func releasedEngine() throws {
+    @Test("a released engine has no content: paused and an invalid range")
+    func releasedEngine() async throws {
         var engine: AetherEngine? = try AetherEngine()
         let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine!)
         engine = nil
         #expect(source.isPaused)
-        #expect(source.timeRange().duration == .positiveInfinity)
+        #expect(!source.timeRange().isValid)
         source.setPlaying(true)
-        source.skip(by: 10)
+        await source.skipAndWait(by: 10)
     }
 
-    #if canImport(AVKit) && !os(watchOS)
-    @Test("the playback delegate is created once and survives as long as the source")
-    func delegateIsRetained() throws {
+    @Test("skipAndWait on an idle engine returns")
+    func skipAwaitsIdle() async throws {
         let engine = try AetherEngine()
         let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
-        #expect(source.playbackDelegate === source.playbackDelegate)
+        await source.skipAndWait(by: 10)
+        #expect(source.isPaused)
+    }
+
+    #if canImport(AVKit) && !os(watchOS) && os(macOS)
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func bump() { lock.lock(); n += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
+    @Test("delegate callbacks through a real controller: skip completes once, no content is invalid")
+    func delegateThroughController() async throws {
+        let engine = try AetherEngine()
+        let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
+        guard let controller = source.makePictureInPictureController() else { return }
+        let delegate = source.playbackDelegate
+        #expect(delegate.pictureInPictureControllerIsPlaybackPaused(controller))
+        #expect(delegate.pictureInPictureControllerTimeRangeForPlayback(controller).start == .negativeInfinity)
+
+        let done = Counter()
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            delegate.pictureInPictureController(controller, skipByInterval: CMTime(seconds: 10, preferredTimescale: 600)) {
+                done.bump()
+                c.resume()
+            }
+        }
+        // NaN interval: completes immediately, still exactly once.
+        delegate.pictureInPictureController(controller, skipByInterval: .invalid) { done.bump() }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(done.value == 2)
+
+        let orphan = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: try AetherEngine())
+        guard let orphanController = orphan.makePictureInPictureController() else { return }
+        let orphanDelegate = orphan.playbackDelegate
+        // Engine of `orphan` is released once the temporary above is gone.
+        #expect(orphanDelegate.pictureInPictureControllerIsPlaybackPaused(orphanController))
+        #expect(!orphanDelegate.pictureInPictureControllerTimeRangeForPlayback(orphanController).isValid)
     }
     #endif
 }
