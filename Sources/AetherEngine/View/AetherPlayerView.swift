@@ -83,11 +83,46 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     }
     #endif
 
+    /// The picture's size while picture in picture is active (nil otherwise). A system PiP window
+    /// mirrors the display layer's own geometry, so a layer sized to this view carries the view's aspect
+    /// into the window as offset or clipped video. While set, the software display layer is sized to
+    /// the picture's aspect-fit rectangle instead, which is where `resizeAspect` draws it anyway, so
+    /// this view looks the same and the window gets a layer of the picture's shape.
+    private var pictureFit: CGSize?
+
+    /// Engine-internal. Size the hosted software layer to the picture's shape (`size` non-nil, PiP
+    /// active) or back to the full view (nil). No-op for a layer that is not a resize-aspect sample
+    /// buffer layer.
+    func setPictureFit(_ size: CGSize?) {
+        guard pictureFit != size else { return }
+        pictureFit = size
+        #if canImport(AppKit)
+        // Flexible sizing would otherwise stretch the layer back to the full view during a live drag.
+        hostedLayer?.autoresizingMask = size == nil ? [.layerWidthSizable, .layerHeightSizable] : []
+        #endif
+        applyLayerFrame()
+    }
+
+    /// Frame for the hosted layer inside `bounds`: the aspect-fit rectangle of `content` when given,
+    /// else the full bounds.
+    nonisolated static func hostedFrame(in bounds: CGRect, fitting content: CGSize?) -> CGRect {
+        guard let content, content.width > 0, content.height > 0, bounds.width > 0, bounds.height > 0 else { return bounds }
+        let scale = min(bounds.width / content.width, bounds.height / content.height)
+        let size = CGSize(width: content.width * scale, height: content.height * scale)
+        return CGRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
+    private var hostedFrame: CGRect {
+        guard let sample = hostedLayer as? AVSampleBufferDisplayLayer, sample.videoGravity == .resizeAspect else { return bounds }
+        return Self.hostedFrame(in: bounds, fitting: pictureFit)
+    }
+
     private func applyLayerFrame() {
         guard hostedLayer != nil || stillLayer != nil else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        hostedLayer?.frame = bounds
+        hostedLayer?.frame = hostedFrame
         presenter.layout(bounds)
         CATransaction.commit()
     }
@@ -118,8 +153,11 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         // bounds with both axes flexible keeps it full-bounds throughout.
         layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         #endif
-        layer.frame = bounds
         hostedLayer = layer
+        #if canImport(AppKit)
+        if pictureFit != nil { layer.autoresizingMask = [] }
+        #endif
+        layer.frame = hostedFrame
         CATransaction.commit()
     }
 

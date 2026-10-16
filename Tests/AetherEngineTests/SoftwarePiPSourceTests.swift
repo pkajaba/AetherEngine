@@ -179,6 +179,30 @@ struct SoftwarePiPTransportTests {
         #expect(abs(snap.range.duration.seconds - 600) < 0.001)
     }
 
+    @Test("the PiP fit sizes the display layer to the picture's aspect and restores on exit")
+    @MainActor
+    func pictureFitFollowsPictureInPicture() throws {
+        let view = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 640, height: 392))
+        let layer = AVSampleBufferDisplayLayer()
+        layer.videoGravity = .resizeAspect
+        view.attach(layer)
+        #expect(layer.frame == CGRect(x: 0, y: 0, width: 640, height: 392))
+        view.setPictureFit(CGSize(width: 1280, height: 720))
+        let aspect = layer.frame.width / layer.frame.height
+        #expect(abs(aspect - 16.0 / 9.0) < 0.001)
+        #expect(layer.frame.width <= 640.001 && layer.frame.height <= 392.001)
+        view.setPictureFit(nil)
+        #expect(layer.frame == CGRect(x: 0, y: 0, width: 640, height: 392))
+    }
+
+    @Test("the aspect-fit rectangle is centred and never exceeds the bounds")
+    func fittedRect() {
+        let r = AetherPlayerView.hostedFrame(in: CGRect(x: 0, y: 0, width: 1200, height: 700), fitting: CGSize(width: 1920, height: 1080))
+        #expect(abs(r.width - 1200) < 0.001 && abs(r.height - 675) < 0.001)
+        #expect(abs(r.midX - 600) < 0.001 && abs(r.midY - 350) < 0.001)
+        #expect(AetherPlayerView.hostedFrame(in: CGRect(x: 0, y: 0, width: 10, height: 10), fitting: nil) == CGRect(x: 0, y: 0, width: 10, height: 10))
+    }
+
     @Test("ending the session resets pictureInPictureActive and clears the source")
     @MainActor
     func stopResetsPictureInPictureFlag() throws {
