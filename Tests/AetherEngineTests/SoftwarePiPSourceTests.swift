@@ -1,3 +1,4 @@
+import AVFoundation
 import Testing
 import CoreMedia
 @testable import AetherEngine
@@ -32,4 +33,61 @@ struct SoftwarePiPSourceTests {
         let r = AetherEngine.softwarePiPTimeRange(isLive: false, sourceTime: 5, currentTime: 5, duration: 0)
         #expect(r.start == .negativeInfinity)
     }
+}
+
+/// Parity E: the transport answers the PiP window's delegate callbacks map onto.
+@Suite("Software PiP transport mapping")
+@MainActor
+struct SoftwarePiPTransportTests {
+    @Test("no software session: no PiP source to offer")
+    func noSessionNoSource() throws {
+        let engine = try AetherEngine()
+        #expect(engine.softwarePiPSource == nil)
+    }
+
+    @Test("skip target is relative, floored at 0, capped at the VOD duration")
+    func skipTargets() {
+        #expect(SoftwarePiPSource.skipTarget(isLive: false, currentTime: 100, duration: 600, by: 15) == 115)
+        #expect(SoftwarePiPSource.skipTarget(isLive: false, currentTime: 100, duration: 600, by: -15) == 85)
+        #expect(SoftwarePiPSource.skipTarget(isLive: false, currentTime: 5, duration: 600, by: -15) == 0)
+        #expect(SoftwarePiPSource.skipTarget(isLive: false, currentTime: 595, duration: 600, by: 15) == 600)
+    }
+
+    @Test("live and unknown-duration sources are not capped")
+    func skipTargetsUncapped() {
+        #expect(SoftwarePiPSource.skipTarget(isLive: true, currentTime: 100, duration: 50, by: 15) == 115)
+        #expect(SoftwarePiPSource.skipTarget(isLive: false, currentTime: 100, duration: 0, by: 15) == 115)
+    }
+
+    @Test("an idle engine reports paused and an indefinite range, and play/pause map onto its transport")
+    func idleEngine() throws {
+        let engine = try AetherEngine()
+        let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
+        #expect(source.isPaused)
+        #expect(source.timeRange().start == .negativeInfinity)
+        source.setPlaying(false)
+        #expect(source.isPaused)
+        source.setPlaying(true)
+        #expect(source.isPaused == (engine.state != .playing))
+    }
+
+    @Test("a released engine degrades to paused and indefinite instead of crashing")
+    func releasedEngine() throws {
+        var engine: AetherEngine? = try AetherEngine()
+        let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine!)
+        engine = nil
+        #expect(source.isPaused)
+        #expect(source.timeRange().duration == .positiveInfinity)
+        source.setPlaying(true)
+        source.skip(by: 10)
+    }
+
+    #if canImport(AVKit) && !os(watchOS)
+    @Test("the playback delegate is created once and survives as long as the source")
+    func delegateIsRetained() throws {
+        let engine = try AetherEngine()
+        let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
+        #expect(source.playbackDelegate === source.playbackDelegate)
+    }
+    #endif
 }

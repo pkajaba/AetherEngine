@@ -10,7 +10,9 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The software host's PiP source now builds its own controller.** `SoftwarePiPSource.makePictureInPictureController()` returns an `AVPictureInPictureController` around the display layer (nil when PiP is unsupported), with a `SoftwarePiPPlaybackDelegate` serving play, pause, skip and the time range from the engine's transport, as the AVPlayer path gets from AVKit. Skip is clamped to the VOD duration. A host no longer re-implements the delegate; it still owns the controller and sets `pictureInPictureActive`.
 
 ## [7.38.1] - 2026-10-16
 
