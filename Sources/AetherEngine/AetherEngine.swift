@@ -1572,6 +1572,8 @@ public final class AetherEngine: ObservableObject {
             // Still correct for hosts that use the engine's layer directly and for the SW displayLayer.
             nativeHost?.playerLayer.videoGravity = newValue
             softwareHost?.displayLayer.videoGravity = newValue
+            // The PiP fit depends on the gravity and no layout pass follows a change.
+            if softwareHost != nil { boundView?.refreshHostedLayerFrame() }
         }
     }
     var _videoGravity: AVLayerVideoGravity = .resizeAspect
@@ -7731,15 +7733,15 @@ public final class AetherEngine: ObservableObject {
         decodedVideoFormat = nil
         // #314: same detach on the software path, where the outgoing renderer's decode thread is what
         // can still hand a frame over while the next host comes up.
-        softwareHost?.setVideoFrameTimeObserver(nil)
-        softwareHost?.stop()
-        // The window shows this session's layer: close it, and drop the host-set flag so the
-        // keepalive policy does not treat a gone window as live (a host that drops its controller
-        // with the source never sees a did-stop).
+        // The window shows this session's layer: close it while the host still feeds that layer, and
+        // drop the host-set flag so the keepalive policy does not treat a gone window as live (a host
+        // that drops its controller with the source never sees a did-stop).
         if let pipSource = softwarePiPSource {
             pipSource.endPictureInPicture()
             pictureInPictureActive = false
         }
+        softwareHost?.setVideoFrameTimeObserver(nil)
+        softwareHost?.stop()
         softwarePiPSource = nil
         softwareHost = nil
 
