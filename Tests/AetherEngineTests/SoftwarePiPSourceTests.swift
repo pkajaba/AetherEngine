@@ -166,6 +166,30 @@ struct SoftwarePiPTransportTests {
         #expect(result.range.start == .negativeInfinity)
     }
 
+    @Test("the snapshot refreshes from state and duration changes without the controller helper")
+    func snapshotRefreshesWithoutController() async throws {
+        let engine = try AetherEngine()
+        let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
+        engine.state = .paused
+        engine.duration = 600
+        await Task.yield()
+        await Task.yield()
+        let snap = source.snapshot.withLock { $0 }
+        #expect(snap.isPaused)
+        #expect(abs(snap.range.duration.seconds - 600) < 0.001)
+    }
+
+    @Test("ending the session resets pictureInPictureActive and clears the source")
+    @MainActor
+    func stopResetsPictureInPictureFlag() throws {
+        let engine = try AetherEngine()
+        engine.softwarePiPSource = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
+        engine.pictureInPictureActive = true
+        engine.stopInternal()
+        #expect(engine.softwarePiPSource == nil)
+        #expect(!engine.pictureInPictureActive)
+    }
+
     @Test("state and duration changes invalidate quietly, and a released source is not retained",
           .enabled(if: SoftwarePiPTransportTests.pipSupported, "PiP is not supported on this host"))
     func invalidationPathReleases() async throws {
@@ -179,8 +203,10 @@ struct SoftwarePiPTransportTests {
             engine.duration = 600
             await Task.yield()
             await Task.yield()
-            #expect(source?.isPaused == true)
-            #expect(abs((source?.timeRange().duration.seconds ?? 0) - 600) < 0.001)
+            // Read the sink-refreshed snapshot directly: the main getters would refresh it live.
+            let snap = try #require(source).snapshot.withLock { $0 }
+            #expect(snap.isPaused)
+            #expect(abs(snap.range.duration.seconds - 600) < 0.001)
             _ = controller
             controller = try #require(source?.makePictureInPictureController())
             _ = controller

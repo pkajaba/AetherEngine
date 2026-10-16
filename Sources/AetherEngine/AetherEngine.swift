@@ -7723,6 +7723,13 @@ public final class AetherEngine: ObservableObject {
         // can still hand a frame over while the next host comes up.
         softwareHost?.setVideoFrameTimeObserver(nil)
         softwareHost?.stop()
+        // The window shows this session's layer: close it, and drop the host-set flag so the
+        // keepalive policy does not treat a gone window as live (a host that drops its controller
+        // with the source never sees a did-stop).
+        if let pipSource = softwarePiPSource {
+            pipSource.endPictureInPicture()
+            pictureInPictureActive = false
+        }
         softwarePiPSource = nil
         softwareHost = nil
 

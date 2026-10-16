@@ -28,14 +28,27 @@ public final class SoftwarePiPSource {
     private weak var engine: AetherEngine?
     #if canImport(AVKit) && !os(watchOS)
     private weak var controller: AVPictureInPictureController?
-    private var stateCancellables: Set<AnyCancellable> = []
     #endif
+    private var stateCancellables: Set<AnyCancellable> = []
 
     init(layer: AVSampleBufferDisplayLayer, isLive: Bool, engine: AetherEngine) {
         self.layer = layer
         self.isLive = isLive
         self.engine = engine
         refreshSnapshot()
+        // One subscription per source, independent of any controller: a host that uses
+        // `playbackDelegate` with its own ContentSource still gets a fresh off-main snapshot.
+        let refresh: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshSnapshot()
+                #if canImport(AVKit) && !os(watchOS)
+                self.controller?.invalidatePlaybackState()
+                #endif
+            }
+        }
+        engine.$state.dropFirst().sink { _ in refresh() }.store(in: &stateCancellables)
+        engine.$duration.dropFirst().sink { _ in refresh() }.store(in: &stateCancellables)
     }
 
     /// Recompute the transport answers from the engine and publish them to `snapshot`.
@@ -63,9 +76,19 @@ public final class SoftwarePiPSource {
     /// Playable range on the enqueued frames' PTS axis (source axis). Live sources report an
     /// indefinite range so the window shows live UI. `.invalid` when the engine is gone: there is
     /// no content to describe, which is not the same as a live source.
+    /// The read also refreshes the off-main snapshot on purpose.
     public func timeRange() -> CMTimeRange { refreshSnapshot().range }
 
+    /// The read also refreshes the off-main snapshot on purpose.
     public var isPaused: Bool { refreshSnapshot().isPaused }
+
+    /// Close the PiP window of the controller this source made, if any. The engine calls this when
+    /// the session ends; a host that built its own controller closes it on `softwarePiPSource == nil`.
+    func endPictureInPicture() {
+        #if canImport(AVKit) && !os(watchOS)
+        controller?.stopPictureInPicture()
+        #endif
+    }
 
     public func setPlaying(_ playing: Bool) {
         if playing { engine?.play() } else { engine?.pause() }
@@ -102,8 +125,8 @@ public final class SoftwarePiPSource {
     /// A ready `AVPictureInPictureController` for this session's display layer, or nil when PiP is
     /// not supported on this device. A reload replaces `AetherEngine.softwarePiPSource` and the
     /// content source holds its delegate weakly, so rebuild the controller on every source change.
-    /// When `state` or `duration` changes, the source invalidates the playback state of the
-    /// controller it made (the latest one). The host keeps the controller, sets its delegate and
+    /// When `state` or `duration` changes, the source refreshes its snapshot and invalidates the
+    /// playback state of the controller it made (the latest one). The host keeps the controller, sets its delegate and
     /// calls `startPictureInPicture()`; it must also set `AetherEngine.pictureInPictureActive` from
     /// the controller's will-start / did-stop callbacks. tvOS AVKit accepts the source but does not
     /// present sample-buffer content (README, Picture in Picture).
@@ -113,17 +136,6 @@ public final class SoftwarePiPSource {
             sampleBufferDisplayLayer: layer, playbackDelegate: playbackDelegate)
         let made = AVPictureInPictureController(contentSource: content)
         controller = made
-        stateCancellables.removeAll()
-        if let engine {
-            let invalidate: @MainActor () -> Void = { [weak self] in
-                Task { @MainActor in
-                    self?.refreshSnapshot()
-                    self?.controller?.invalidatePlaybackState()
-                }
-            }
-            engine.$state.dropFirst().sink { _ in invalidate() }.store(in: &stateCancellables)
-            engine.$duration.dropFirst().sink { _ in invalidate() }.store(in: &stateCancellables)
-        }
         return made
     }
     #endif
