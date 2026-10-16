@@ -172,6 +172,9 @@ struct SoftwarePiPTransportTests {
         let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
         // The source starts out paused (the engine is idle), so only a refresh can make it "playing".
         engine.state = .playing
+        await Task.yield()
+        await Task.yield()
+        #expect(!source.snapshot.withLock { $0 }.isPaused)
         engine.duration = 600
         await Task.yield()
         await Task.yield()
