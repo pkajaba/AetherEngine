@@ -93,8 +93,9 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     private var pictureFit: CGSize?
     /// The size of the macOS system PiP window's picture area while it is known (nil otherwise). It takes
     /// precedence over `pictureFit`: the layer is laid out at the origin with exactly this size and its
-    /// own gravity fits the picture. The system draws an opaque bar over part of that window; we fit
-    /// to the visible area and leave the bar alone (FB22411168).
+    /// own gravity fits the picture. The system draws an opaque bar over the top of that window, covering
+    /// part of the picture; its height is not public, so we fit to the whole window and leave the bar
+    /// alone (FB22411168).
     private var pictureArea: CGSize?
     /// `clipsToBounds` / `masksToBounds` as the host had it, restored when the fit ends.
     private var clipsBeforeFit: Bool?
@@ -248,6 +249,9 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     /// `attach`: a layer that has moved to another surface stays there.
     func detach() {
         clearStill()
+        // The PiP layout belongs to the engine that set it; a view bound again later starts clean.
+        pictureFit = nil
+        pictureArea = nil
         guard let hosted = hostedLayer else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)

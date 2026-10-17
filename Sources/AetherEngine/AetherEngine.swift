@@ -1863,7 +1863,9 @@ public final class AetherEngine: ObservableObject {
             if pictureInPictureAreaTracker == nil {
                 pictureInPictureAreaTracker = PictureInPictureAreaTracker { [weak self] in self?.pictureInPictureArea = $0 }
             }
-            pictureInPictureAreaTracker?.start(known: softwarePiPSource?.windowsBeforeController ?? [], host: boundView?.window)
+            let aspect = softwareDisplaySize.flatMap { $0.width > 0 && $0.height > 0 ? $0.width / $0.height : nil }
+            pictureInPictureAreaTracker?.start(known: softwarePiPSource?.windowsBeforeController ?? .weakObjects(),
+                                               host: boundView?.window, aspect: aspect)
         } else {
             pictureInPictureAreaTracker?.stop()
         }

@@ -34,7 +34,7 @@ public final class SoftwarePiPSource {
     #endif
     #if os(macOS)
     /// The windows that existed when the controller was made, so the PiP window can be told apart later.
-    private(set) var windowsBeforeController: Set<ObjectIdentifier>?
+    private(set) var windowsBeforeController: NSHashTable<NSWindow>?
     #endif
     private var stateCancellables: Set<AnyCancellable> = []
 
@@ -150,7 +150,10 @@ public final class SoftwarePiPSource {
         let content = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: layer, playbackDelegate: playbackDelegate)
         #if os(macOS)
-        windowsBeforeController = Set(NSApp.windows.map(ObjectIdentifier.init))
+        // Weak, so a window freed before PiP starts cannot be mistaken for the PiP window by address.
+        let before = NSHashTable<NSWindow>.weakObjects()
+        (NSApp?.windows ?? []).forEach(before.add)
+        windowsBeforeController = before
         #endif
         let made = AVPictureInPictureController(contentSource: content)
         controller = made
