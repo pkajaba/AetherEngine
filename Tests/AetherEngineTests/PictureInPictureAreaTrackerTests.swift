@@ -99,6 +99,8 @@ struct PictureInPictureAreaTrackerTests {
         #expect(reports.sizes.last as CGSize?? == .some(nil))
         #expect(!view.postsFrameChangedNotifications)
         let count = reports.sizes.count
+        // Turn posting back on so a frame observer left behind would hear the change.
+        view.postsFrameChangedNotifications = true
         view.setFrameSize(CGSize(width: 800, height: 450))
         NotificationCenter.default.post(name: NSWindow.didUpdateNotification, object: target)
         pump()
@@ -135,16 +137,20 @@ struct PictureInPictureAreaTrackerTests {
         #expect(!view.postsFrameChangedNotifications)
     }
 
-    @Test("a windows snapshot does not keep windows alive")
-    func snapshotIsWeak() {
-        let table = NSHashTable<NSWindow>.weakObjects()
-        weak var weakWindow: NSPanel?
-        do {
-            let p = panel(CGSize(width: 10, height: 10))
-            weakWindow = p
-            table.add(p)
-        }
-        #expect(weakWindow == nil || table.count <= 1)
+    @Test("stop leaves the source's snapshot alone, so a second start on it still filters")
+    func stopKeepsSnapshot() {
+        let old = panel(CGSize(width: 556, height: 312))
+        let target = panel(CGSize(width: 556, height: 312))
+        let snapshot = known([old])
+        let reports = Reports()
+        let tracker = tracker([old, target], reports)
+        tracker.start(known: snapshot, host: nil, aspect: 16.0 / 9.0)
+        tracker.stop()
+        #expect(snapshot.count == 1 && snapshot.contains(old))
+        tracker.start(known: snapshot, host: nil, aspect: 16.0 / 9.0)
+        #expect(reports.last == CGSize(width: 556, height: 312))
+        // `old` was still filtered: with it counted, two panels would have matched and nothing been adopted.
+        tracker.stop()
     }
 
     @Test("engine wiring: the area lays the layer out only while PiP is active, and clearing it restores")

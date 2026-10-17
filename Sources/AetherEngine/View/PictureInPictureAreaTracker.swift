@@ -54,7 +54,8 @@ final class PictureInPictureAreaTracker {
         guard isTracking else { return }
         isTracking = false
         registrations.teardown()
-        known.removeAllObjects()
+        // Drop the reference only: the table belongs to the source that made it and is reused.
+        known = .weakObjects()
         hostWindow = nil
         aspect = nil
         onChange(nil)
