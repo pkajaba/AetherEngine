@@ -91,6 +91,11 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     /// `resizeAspect` and `resizeAspectFill` this view looks the same; under `resize` the picture is
     /// shown undistorted while PiP is up.
     private var pictureFit: CGSize?
+    /// The size of the macOS system PiP window's picture area while it is known (nil otherwise). It takes
+    /// precedence over `pictureFit`: the layer is laid out at the origin with exactly this size and its
+    /// own gravity fits the picture. The system draws an opaque bar over part of that window; we fit
+    /// to the visible area and leave the bar alone (FB22411168).
+    private var pictureArea: CGSize?
     /// `clipsToBounds` / `masksToBounds` as the host had it, restored when the fit ends.
     private var clipsBeforeFit: Bool?
 
@@ -99,6 +104,19 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     func setPictureFit(_ size: CGSize?) {
         guard pictureFit != size else { return }
         pictureFit = size
+        #if canImport(AppKit)
+        hostedLayer?.autoresizingMask = layerAutoresizing
+        #endif
+        updateClipping()
+        applyLayerFrame()
+    }
+
+    /// Engine-internal. Lay the hosted software layer out to the PiP window's picture area (`size`
+    /// non-nil) or back to the `pictureFit` / full view layout (nil). Called only on macOS.
+    func setPictureArea(_ size: CGSize?) {
+        let size = size.flatMap { $0.width > 0 && $0.height > 0 ? $0 : nil }
+        guard pictureArea != size else { return }
+        pictureArea = size
         #if canImport(AppKit)
         hostedLayer?.autoresizingMask = layerAutoresizing
         #endif
@@ -119,7 +137,8 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     /// the picture's rectangle rather than the bounds: it keeps its size and stays centred during a
     /// drag, and the next layout pass fits it.
     private var layerAutoresizing: CAAutoresizingMask {
-        pictureFit == nil
+        if pictureArea != nil { return [] }
+        return pictureFit == nil
             ? [.layerWidthSizable, .layerHeightSizable]
             : [.layerMinXMargin, .layerMaxXMargin, .layerMinYMargin, .layerMaxYMargin]
     }
@@ -127,8 +146,10 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
 
     /// The aspect-fill rectangle is larger than the view, so the view clips it while the fit is on.
     private var wantsClipping: Bool {
-        guard pictureFit != nil, let sample = hostedLayer as? AVSampleBufferDisplayLayer else { return false }
-        return sample.videoGravity == .resizeAspectFill
+        guard let sample = hostedLayer as? AVSampleBufferDisplayLayer else { return false }
+        // The area frame can exceed this view, so the view clips it.
+        if pictureArea != nil { return true }
+        return pictureFit != nil && sample.videoGravity == .resizeAspectFill
     }
 
     private func updateClipping() {
@@ -166,8 +187,15 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
                       width: size.width, height: size.height)
     }
 
+    /// Frame for the layer while the PiP window's picture area is known: origin at zero, the area's size.
+    /// The layer's own gravity fits the picture inside it.
+    nonisolated static func pictureAreaFrame(_ area: CGSize) -> CGRect {
+        CGRect(origin: .zero, size: area)
+    }
+
     private var hostedFrame: CGRect {
         guard let sample = hostedLayer as? AVSampleBufferDisplayLayer else { return bounds }
+        if let pictureArea { return Self.pictureAreaFrame(pictureArea) }
         return Self.hostedFrame(in: bounds, fitting: pictureFit, gravity: sample.videoGravity)
     }
 

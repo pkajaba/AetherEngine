@@ -219,6 +219,40 @@ struct SoftwarePiPTransportTests {
         #endif
     }
 
+    @Test("the PiP window's picture area takes the layer to the origin at that size and restores on exit",
+          arguments: [AVLayerVideoGravity.resizeAspect, .resizeAspectFill, .resize])
+    @MainActor
+    func pictureAreaFitsAndRestores(gravity: AVLayerVideoGravity) {
+        let full = CGRect(x: 0, y: 0, width: 640, height: 392)
+        let view = AetherPlayerView(frame: full)
+        let layer = AVSampleBufferDisplayLayer()
+        layer.videoGravity = gravity
+        view.attach(layer)
+        view.setPictureFit(CGSize(width: 1280, height: 720))
+        view.setPictureArea(CGSize(width: 558, height: 313))
+        #expect(layer.frame == CGRect(x: 0, y: 0, width: 558, height: 313))
+        #expect(layer.videoGravity == gravity)
+        #expect(clips(view))
+        // A window resize re-fits; a view layout pass does not undo it.
+        view.setPictureArea(CGSize(width: 720, height: 405))
+        #if canImport(AppKit)
+        view.setFrameSize(CGSize(width: 800, height: 500))
+        view.layoutSubtreeIfNeeded()
+        #endif
+        #expect(layer.frame == CGRect(x: 0, y: 0, width: 720, height: 405))
+        // No size (or an empty one) hands the layout back to the picture fit, then the full view.
+        view.setPictureArea(.zero)
+        #expect(abs(layer.frame.width / layer.frame.height - 16.0 / 9.0) < 0.001)
+        view.setPictureFit(nil)
+        #expect(layer.frame == CGRect(origin: .zero, size: view.bounds.size))
+        #expect(!clips(view))
+    }
+
+    @Test("the picture area frame is the area at the origin")
+    func pictureAreaRect() {
+        #expect(AetherPlayerView.pictureAreaFrame(CGSize(width: 417, height: 313)) == CGRect(x: 0, y: 0, width: 417, height: 313))
+    }
+
     @Test("a host's own clipping setting survives the PiP fit")
     @MainActor
     func hostClippingRestored() {

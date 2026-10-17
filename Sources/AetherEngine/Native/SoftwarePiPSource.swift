@@ -2,6 +2,9 @@ import AVFoundation
 import Combine
 import CoreMedia
 import os
+#if os(macOS)
+import AppKit
+#endif
 #if canImport(AVKit)
 import AVKit
 #endif
@@ -28,6 +31,10 @@ public final class SoftwarePiPSource {
     private weak var engine: AetherEngine?
     #if canImport(AVKit) && !os(watchOS)
     private weak var controller: AVPictureInPictureController?
+    #endif
+    #if os(macOS)
+    /// The windows that existed when the controller was made, so the PiP window can be told apart later.
+    private(set) var windowsBeforeController: Set<ObjectIdentifier>?
     #endif
     private var stateCancellables: Set<AnyCancellable> = []
 
@@ -90,6 +97,14 @@ public final class SoftwarePiPSource {
         #endif
     }
 
+    /// The PiP window changed size (the render-size delegate callback): macOS looks again for the
+    /// window's picture area.
+    func pictureInPictureRenderSizeChanged() {
+        #if os(macOS)
+        engine?.pictureInPictureAreaTracker?.refresh()
+        #endif
+    }
+
     public func setPlaying(_ playing: Bool) {
         if playing { engine?.play() } else { engine?.pause() }
     }
@@ -134,6 +149,9 @@ public final class SoftwarePiPSource {
         guard Self.isSupported else { return nil }
         let content = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: layer, playbackDelegate: playbackDelegate)
+        #if os(macOS)
+        windowsBeforeController = Set(NSApp.windows.map(ObjectIdentifier.init))
+        #endif
         let made = AVPictureInPictureController(contentSource: content)
         controller = made
         return made
@@ -172,7 +190,13 @@ public final class SoftwarePiPPlaybackDelegate: NSObject, AVPictureInPictureSamp
         return source.snapshot.withLock { $0.isPaused }
     }
 
-    public func pictureInPictureController(_ controller: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {}
+    public func pictureInPictureController(_ controller: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { source?.pictureInPictureRenderSizeChanged() }
+        } else {
+            Task { @MainActor [weak source] in source?.pictureInPictureRenderSizeChanged() }
+        }
+    }
 
     public func pictureInPictureController(_ controller: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion completionHandler: @escaping @Sendable () -> Void) {
         let seconds = skipInterval.seconds
