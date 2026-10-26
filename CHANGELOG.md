@@ -32,7 +32,9 @@ the public-API contract.
 - **macOS: the software layer fits the system PiP window.** While PiP is active the layer is laid out at the
   window's size (found through public AppKit and followed on resize; the picture-shaped layout stays when no window is
   found), so the layer's `videoGravity` fits the picture. The system draws an opaque bar over the top of that
-  window for sample-buffer sources, which no public API removes (Apple FB22411168).
+  window for sample-buffer sources, which no public API removes (Apple FB22411168). A picture of another
+  aspect during PiP (16:9 to 4:3 and back) keeps the same window: AVKit resizes it to the new picture, and the
+  layer follows the window instead of falling back to the view's fit.
 - **`SoftwarePiPSource.isSupported`** says whether the system offers PiP at all; the controller helper returns
   nil when it is false.
 - **The PiP source keeps its off-main snapshot fresh without the controller helper**, so a host using

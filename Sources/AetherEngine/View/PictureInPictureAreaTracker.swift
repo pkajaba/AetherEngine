@@ -26,6 +26,8 @@ final class PictureInPictureAreaTracker {
     private var isTracking = false
     private var searchDeadline: TimeInterval = 0
     private var searchExpired = false
+    /// The adopted window was matched without a known aspect, so it still has to pass the first one.
+    private var adoptionUnchecked = false
     private let registrations = Registrations()
 
     /// Aspect difference up to which a panel counts as showing the picture.
@@ -35,8 +37,8 @@ final class PictureInPictureAreaTracker {
     /// window is in place within about a second of the host reporting PiP active, so five seconds
     /// leaves room for a slow start; past it, no panel is going to match (an out-of-process window,
     /// an aspect outside the tolerance) and the app-wide observer would only cost every update for
-    /// the rest of the session. The fit layout stays. A new search starts when the picture's aspect
-    /// changes or an adopted window goes away.
+    /// the rest of the session. The fit layout stays. A new search starts when an adopted window goes
+    /// away, or when the picture's aspect changes while no window is adopted.
     static let searchBudget: TimeInterval = 5
 
     /// `windows`, `isVisible` and `now` are injectable for tests; the defaults are the app's windows
@@ -65,15 +67,22 @@ final class PictureInPictureAreaTracker {
         refresh()
     }
 
-    /// The picture's aspect arrived or changed. A window adopted under the old (or no) aspect that no
-    /// longer matches is dropped, no area is reported for it, and the search starts again.
+    /// The picture's aspect arrived or changed. AVKit resizes the PiP window to each new picture shape,
+    /// and the new aspect can arrive before that resize has happened. So a window matched under a known
+    /// aspect stays the PiP window until PiP ends, through any number of aspect changes, and its size is
+    /// followed as it changes. A window adopted before the aspect was known has not been matched against
+    /// the picture yet: the first aspect checks it, and it is dropped if it does not match. With no window
+    /// adopted, the search starts again under the new aspect.
     func updateAspect(_ newAspect: CGFloat) {
         guard isTracking, newAspect > 0 else { return }
         if let aspect, aspect > 0, abs(newAspect / aspect - 1) <= Self.aspectTolerance { return }
         aspect = newAspect
-        if let view = registrations.view, !aspectMatches(view.bounds.size) {
-            registrations.release()
-            onChange(nil)
+        if adoptionUnchecked {
+            adoptionUnchecked = false
+            if let view = registrations.view, !aspectMatches(view.bounds.size) {
+                registrations.release()
+                onChange(nil)
+            }
         }
         if registrations.view == nil {
             beginSearch()
@@ -91,6 +100,7 @@ final class PictureInPictureAreaTracker {
         hostWindow = nil
         aspect = nil
         searchExpired = false
+        adoptionUnchecked = false
         onChange(nil)
     }
 
@@ -120,6 +130,7 @@ final class PictureInPictureAreaTracker {
             return
         }
         registrations.dropUpdateObserver()
+        adoptionUnchecked = aspect == nil
         registrations.adopt(view, frameObserver: NotificationCenter.default.addObserver(
             forName: NSView.frameDidChangeNotification, object: view, queue: .main
         ) { [weak self] _ in

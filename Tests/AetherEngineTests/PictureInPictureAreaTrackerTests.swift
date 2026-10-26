@@ -265,6 +265,81 @@ struct PictureInPictureAreaTrackerTests {
         tracker.stop()
     }
 
+    @Test("a window matched under a known aspect is kept through aspect changes, in either direction")
+    func adoptionSurvivesAspectChanges() {
+        let target = panel(CGSize(width: 556, height: 312))
+        let view = try! #require(target.contentView)
+        let reports = Reports()
+        let tracker = tracker([target], reports)
+        tracker.start(known: .weakObjects(), host: nil, aspect: 16.0 / 9.0)
+        #expect(reports.last == CGSize(width: 556, height: 312))
+        let count = reports.sizes.count
+        tracker.updateAspect(4.0 / 3.0)
+        tracker.updateAspect(16.0 / 9.0)
+        tracker.updateAspect(4.0 / 3.0)
+        #expect(reports.sizes.count == count)
+        #expect(view.postsFrameChangedNotifications)
+        // AVKit resizes the window to the new picture shape, a little after the aspect arrives. The kept
+        // window reports each of those sizes.
+        view.setFrameSize(CGSize(width: 480, height: 360))
+        pump()
+        #expect(reports.last == CGSize(width: 480, height: 360))
+        view.setFrameSize(CGSize(width: 500, height: 281))
+        pump()
+        #expect(reports.last == CGSize(width: 500, height: 281))
+        tracker.stop()
+        #expect(reports.last == nil)
+    }
+
+    @Test("a window matched under the first known aspect is kept when the aspect changes again")
+    func firstAspectCheckedOnce() {
+        let target = panel(CGSize(width: 556, height: 312))
+        let reports = Reports()
+        let tracker = tracker([target], reports)
+        tracker.start(known: .weakObjects(), host: nil, aspect: nil)
+        tracker.updateAspect(16.0 / 9.0)
+        #expect(reports.last == CGSize(width: 556, height: 312))
+        let count = reports.sizes.count
+        tracker.updateAspect(4.0 / 3.0)
+        #expect(reports.sizes.count == count)
+        #expect(reports.last == CGSize(width: 556, height: 312))
+        tracker.stop()
+    }
+
+    @Test("engine wiring: a picture aspect change during PiP keeps the window's area and the layer on it")
+    func engineKeepsAreaThroughAspectChange() throws {
+        let right = panel(CGSize(width: 556, height: 312))
+        let windows: [NSWindow] = [right]
+        let full = CGRect(x: 0, y: 0, width: 640, height: 392)
+        let view = AetherPlayerView(frame: full)
+        let engine = try AetherEngine()
+        let host = SoftwarePlaybackHost()
+        defer { host.stop() }
+        engine.softwareHost = host
+        engine.bind(view: view)
+        let layer = host.displayLayer
+        engine.pictureInPictureAreaTracker = PictureInPictureAreaTracker(
+            windows: { windows }, isVisible: { _ in true },
+            onChange: { [weak engine] in engine?.pictureInPictureArea = $0 })
+        engine.softwareDisplaySize = CGSize(width: 1280, height: 720)
+
+        engine.pictureInPictureActive = true
+        #expect(engine.pictureInPictureArea == CGSize(width: 556, height: 312))
+        #expect(layer.frame == CGRect(x: 0, y: 0, width: 556, height: 312))
+
+        engine.softwareDisplaySize = CGSize(width: 640, height: 480)
+        #expect(engine.pictureInPictureArea == CGSize(width: 556, height: 312))
+        #expect(layer.frame == CGRect(x: 0, y: 0, width: 556, height: 312))
+
+        engine.softwareDisplaySize = CGSize(width: 1280, height: 720)
+        #expect(engine.pictureInPictureArea == CGSize(width: 556, height: 312))
+        #expect(layer.frame == CGRect(x: 0, y: 0, width: 556, height: 312))
+
+        engine.pictureInPictureActive = false
+        #expect(engine.pictureInPictureArea == nil)
+        #expect(layer.frame == full)
+    }
+
     @Test("engine wiring: the picture size arriving during PiP re-arms the window match")
     func engineRearmsOnDisplaySize() throws {
         let wrong = panel(CGSize(width: 400, height: 400))
