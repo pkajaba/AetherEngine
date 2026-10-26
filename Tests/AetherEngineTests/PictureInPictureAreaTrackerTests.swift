@@ -153,6 +153,144 @@ struct PictureInPictureAreaTrackerTests {
         tracker.stop()
     }
 
+    private final class Clock {
+        var value: TimeInterval = 100
+    }
+
+    private func tracker(_ windows: [NSWindow], _ reports: Reports, clock: Clock) -> PictureInPictureAreaTracker {
+        PictureInPictureAreaTracker(windows: { windows }, isVisible: { _ in true }, now: { clock.value },
+                                    onChange: { reports.sizes.append($0) })
+    }
+
+    private func postUpdate(_ window: NSWindow) {
+        NotificationCenter.default.post(name: NSWindow.didUpdateNotification, object: window)
+        pump()
+    }
+
+    @Test("the search for the window stops observing updates after its budget, and keeps no area")
+    func searchExpires() {
+        let target = panel(CGSize(width: 100, height: 100))
+        let reports = Reports()
+        let clock = Clock()
+        let tracker = tracker([target], reports, clock: clock)
+        tracker.start(known: .weakObjects(), host: nil, aspect: 16.0 / 9.0)
+
+        // Inside the budget a late match is still found (see foundOnUpdate); here it just keeps looking.
+        clock.value += PictureInPictureAreaTracker.searchBudget - 1
+        postUpdate(target)
+        #expect(reports.sizes.isEmpty)
+
+        // The first update past the budget ends the observation.
+        clock.value += 2
+        postUpdate(target)
+        #expect(reports.sizes.isEmpty)
+        target.contentView?.setFrameSize(CGSize(width: 556, height: 312.75))
+        postUpdate(target)
+        #expect(reports.sizes.isEmpty)
+
+        // Stopping and starting again is a new search.
+        tracker.stop()
+        tracker.start(known: .weakObjects(), host: nil, aspect: 16.0 / 9.0)
+        #expect(reports.last == CGSize(width: 556, height: 312.75))
+        tracker.stop()
+    }
+
+    @Test("a new aspect after the search expired starts a new search")
+    func aspectRestartsExpiredSearch() {
+        let target = panel(CGSize(width: 400, height: 300))
+        let reports = Reports()
+        let clock = Clock()
+        let tracker = tracker([target], reports, clock: clock)
+        tracker.start(known: .weakObjects(), host: nil, aspect: 16.0 / 9.0)
+        clock.value += PictureInPictureAreaTracker.searchBudget + 1
+        postUpdate(target)
+        #expect(reports.sizes.isEmpty)
+        tracker.updateAspect(4.0 / 3.0)
+        #expect(reports.last == CGSize(width: 400, height: 300))
+        tracker.stop()
+    }
+
+    @Test("an aspect that arrives after start finds a window the unknown aspect could not tell apart")
+    func aspectArrivesLate() {
+        let a = panel(CGSize(width: 556, height: 312))
+        let b = panel(CGSize(width: 400, height: 400))
+        let reports = Reports()
+        let tracker = tracker([a, b], reports)
+        tracker.start(known: .weakObjects(), host: nil, aspect: nil)
+        #expect(reports.sizes.isEmpty)
+        tracker.updateAspect(16.0 / 9.0)
+        #expect(reports.last == CGSize(width: 556, height: 312))
+        tracker.stop()
+    }
+
+    @Test("a window adopted under an unknown aspect is dropped when the known aspect does not match it")
+    func wrongAdoptionIsDropped() {
+        let wrong = panel(CGSize(width: 400, height: 400))
+        let right = panel(CGSize(width: 556, height: 312))
+        let wrongView = try! #require(wrong.contentView)
+        var windows: [NSWindow] = [wrong]
+        let reports = Reports()
+        let tracker = PictureInPictureAreaTracker(windows: { windows }, isVisible: { _ in true },
+                                                  onChange: { reports.sizes.append($0) })
+        tracker.start(known: .weakObjects(), host: nil, aspect: nil)
+        #expect(reports.last == CGSize(width: 400, height: 400))
+        #expect(wrongView.postsFrameChangedNotifications)
+
+        tracker.updateAspect(16.0 / 9.0)
+        #expect(reports.sizes.last as CGSize?? == .some(nil))
+        #expect(!wrongView.postsFrameChangedNotifications)
+
+        // The real window turns up afterwards and is adopted; the wrong one is still ignored.
+        windows.append(right)
+        postUpdate(right)
+        #expect(reports.last == CGSize(width: 556, height: 312))
+        wrongView.setFrameSize(CGSize(width: 500, height: 500))
+        pump()
+        #expect(reports.last == CGSize(width: 556, height: 312))
+        tracker.stop()
+    }
+
+    @Test("an adopted window that fits the arriving aspect is kept, and a repeated aspect changes nothing")
+    func matchingAdoptionIsKept() {
+        let target = panel(CGSize(width: 556, height: 312))
+        let view = try! #require(target.contentView)
+        let reports = Reports()
+        let tracker = tracker([target], reports)
+        tracker.start(known: .weakObjects(), host: nil, aspect: nil)
+        let count = reports.sizes.count
+        tracker.updateAspect(16.0 / 9.0)
+        tracker.updateAspect(16.0 / 9.0)
+        #expect(reports.sizes.count == count)
+        #expect(view.postsFrameChangedNotifications)
+        tracker.stop()
+    }
+
+    @Test("engine wiring: the picture size arriving during PiP re-arms the window match")
+    func engineRearmsOnDisplaySize() throws {
+        let wrong = panel(CGSize(width: 400, height: 400))
+        let right = panel(CGSize(width: 556, height: 312))
+        var windows: [NSWindow] = [wrong]
+        let engine = try AetherEngine()
+        let host = SoftwarePlaybackHost()
+        defer { host.stop() }
+        engine.softwareHost = host
+        engine.pictureInPictureAreaTracker = PictureInPictureAreaTracker(
+            windows: { windows }, isVisible: { _ in true },
+            onChange: { [weak engine] in engine?.pictureInPictureArea = $0 })
+
+        // PiP starts before the first frame told the engine the picture's size: the lone panel is taken.
+        engine.pictureInPictureActive = true
+        #expect(engine.pictureInPictureArea == CGSize(width: 400, height: 400))
+
+        engine.softwareDisplaySize = CGSize(width: 1280, height: 720)
+        #expect(engine.pictureInPictureArea == nil)
+        windows.append(right)
+        postUpdate(right)
+        #expect(engine.pictureInPictureArea == CGSize(width: 556, height: 312))
+        engine.pictureInPictureActive = false
+        #expect(engine.pictureInPictureArea == nil)
+    }
+
     @Test("engine wiring: the area lays the layer out only while PiP is active, and clearing it restores")
     func engineDrivesPictureArea() throws {
         let full = CGRect(x: 0, y: 0, width: 640, height: 392)

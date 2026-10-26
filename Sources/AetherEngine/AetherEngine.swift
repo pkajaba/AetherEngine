@@ -1117,7 +1117,12 @@ public final class AetherEngine: ObservableObject {
     /// this one's rectangle. The native and bypass paths mount an `AVPlayerLayer`, which measures its
     /// own `videoRect` and carries `AVPlayerItem.presentationSize`; this stays nil there.
     @Published public internal(set) var softwareDisplaySize: CGSize? {
-        didSet { updatePictureFit() }
+        didSet {
+            updatePictureFit()
+            #if os(macOS)
+            updatePictureInPictureAspect()
+            #endif
+        }
     }
     #if os(macOS)
     /// macOS: the content size of the system PiP window while a software session is in it, nil
@@ -2023,6 +2028,13 @@ public final class AetherEngine: ObservableObject {
     }
 
     #if os(macOS)
+    /// The picture's size arrived or changed: let the window tracker match against its aspect.
+    func updatePictureInPictureAspect() {
+        guard pictureInPictureActive, softwareHost != nil,
+              let size = softwareDisplaySize, size.width > 0, size.height > 0 else { return }
+        pictureInPictureAreaTracker?.updateAspect(size.width / size.height)
+    }
+
     /// macOS: follow the system PiP window while a software session is in it, see
     /// `PictureInPictureAreaTracker`. Stopped (and the area cleared) when PiP ends.
     func updatePictureInPictureTracking() {

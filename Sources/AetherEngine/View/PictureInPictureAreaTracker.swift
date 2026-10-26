@@ -12,27 +12,42 @@ import AppKit
 ///
 /// This relies on the system PiP window being an in-process panel. If that ever stops being true, or
 /// the match is not unique, nothing is adopted, no area is reported and the layer keeps the
-/// `AetherPlayerView.setPictureFit` layout, which is safe.
+/// `AetherPlayerView.setPictureFit` layout, which is safe. The search for the window is bounded by
+/// `searchBudget`, so an app-wide window observer does not outlive a window that never turns up.
 @MainActor
 final class PictureInPictureAreaTracker {
     private let onChange: (CGSize?) -> Void
     private let windows: () -> [NSWindow]
     private let isVisible: (NSWindow) -> Bool
+    private let now: () -> TimeInterval
     private var known = NSHashTable<NSWindow>.weakObjects()
     private weak var hostWindow: NSWindow?
     private var aspect: CGFloat?
     private var isTracking = false
+    private var searchDeadline: TimeInterval = 0
+    private var searchExpired = false
     private let registrations = Registrations()
 
     /// Aspect difference up to which a panel counts as showing the picture.
     static let aspectTolerance: CGFloat = 0.02
 
-    /// `windows` and `isVisible` are injectable for tests; the defaults are the app's windows.
+    /// How long the search for the window may keep observing window updates, in seconds. The system
+    /// window is in place within about a second of the host reporting PiP active, so five seconds
+    /// leaves room for a slow start; past it, no panel is going to match (an out-of-process window,
+    /// an aspect outside the tolerance) and the app-wide observer would only cost every update for
+    /// the rest of the session. The fit layout stays. A new search starts when the picture's aspect
+    /// changes or an adopted window goes away.
+    static let searchBudget: TimeInterval = 5
+
+    /// `windows`, `isVisible` and `now` are injectable for tests; the defaults are the app's windows
+    /// and the system uptime.
     init(windows: @escaping () -> [NSWindow] = { NSApp?.windows ?? [] },
          isVisible: @escaping (NSWindow) -> Bool = { $0.isVisible },
+         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          onChange: @escaping (CGSize?) -> Void) {
         self.windows = windows
         self.isVisible = isVisible
+        self.now = now
         self.onChange = onChange
     }
 
@@ -46,7 +61,24 @@ final class PictureInPictureAreaTracker {
         self.known = known
         hostWindow = host
         self.aspect = aspect
+        beginSearch()
         refresh()
+    }
+
+    /// The picture's aspect arrived or changed. A window adopted under the old (or no) aspect that no
+    /// longer matches is dropped, no area is reported for it, and the search starts again.
+    func updateAspect(_ newAspect: CGFloat) {
+        guard isTracking, newAspect > 0 else { return }
+        if let aspect, aspect > 0, abs(newAspect / aspect - 1) <= Self.aspectTolerance { return }
+        aspect = newAspect
+        if let view = registrations.view, !aspectMatches(view.bounds.size) {
+            registrations.release()
+            onChange(nil)
+        }
+        if registrations.view == nil {
+            beginSearch()
+            refresh()
+        }
     }
 
     /// Stop following, give the content view back its notification setting and report no area.
@@ -58,6 +90,7 @@ final class PictureInPictureAreaTracker {
         known = .weakObjects()
         hostWindow = nil
         aspect = nil
+        searchExpired = false
         onChange(nil)
     }
 
@@ -65,8 +98,9 @@ final class PictureInPictureAreaTracker {
     func refresh() {
         guard isTracking else { return }
         if registrations.view == nil {
-            registrations.dropFrameObserver()
-            adoptWindow()
+            // The window we followed is gone: look for the next one with a fresh budget.
+            if registrations.dropFrameObserver() { beginSearch() }
+            if !searchExpired { adoptWindow() }
         }
         if let view = registrations.view { report(view.bounds.size) }
     }
@@ -77,7 +111,12 @@ final class PictureInPictureAreaTracker {
                 && window.contentView.map { aspectMatches($0.bounds.size) } == true
         }
         guard matches.count == 1, let view = matches[0].contentView else {
-            watchWindowUpdates()
+            if now() >= searchDeadline {
+                searchExpired = true
+                registrations.dropUpdateObserver()
+            } else {
+                watchWindowUpdates()
+            }
             return
         }
         registrations.dropUpdateObserver()
@@ -86,6 +125,11 @@ final class PictureInPictureAreaTracker {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
         })
+    }
+
+    private func beginSearch() {
+        searchDeadline = now() + Self.searchBudget
+        searchExpired = false
     }
 
     /// Until a window is adopted, every window update is a chance to find it. Cheap and public.
@@ -134,12 +178,15 @@ final class PictureInPictureAreaTracker {
             token.map(NotificationCenter.default.removeObserver)
         }
 
-        func dropFrameObserver() {
+        /// Returns whether there was a frame observer to drop.
+        @discardableResult
+        func dropFrameObserver() -> Bool {
             let token = lock.withLock { () -> NSObjectProtocol? in
                 defer { frameObserver = nil }
                 return frameObserver
             }
             token.map(NotificationCenter.default.removeObserver)
+            return token != nil
         }
 
         @MainActor
@@ -155,6 +202,11 @@ final class PictureInPictureAreaTracker {
         /// Remove every observer and restore the adopted view's setting.
         func teardown() {
             dropUpdateObserver()
+            release()
+        }
+
+        /// Drop the frame observer and give the adopted view its setting back.
+        func release() {
             dropFrameObserver()
             let (view, before) = lock.withLock { () -> (NSView?, Bool) in
                 defer { adopted = nil }
