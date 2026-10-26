@@ -383,6 +383,23 @@ struct SoftwarePiPTransportTests {
         engine.stopInternal()
         #expect(engine.softwarePiPSource == nil)
         #expect(!engine.pictureInPictureActive)
+        #expect(!engine.isResettingPictureInPictureForStop)
+    }
+
+    @Test("a window closing owes the background decision, the reset inside stopInternal does not")
+    @MainActor
+    func stopResetOwesNoBackgroundDecision() throws {
+        let engine = try AetherEngine()
+        // A window that closes (the flag went true to false) owes it.
+        #expect(engine.closingPictureInPictureOwesBackgroundDecision(wasActive: true))
+        #expect(!engine.closingPictureInPictureOwesBackgroundDecision(wasActive: false))
+        // The flag is not a close while the session teardown clears it, on every platform.
+        engine.isResettingPictureInPictureForStop = true
+        #expect(!engine.closingPictureInPictureOwesBackgroundDecision(wasActive: true))
+        engine.isResettingPictureInPictureForStop = false
+        // Only a live flag is not a close.
+        engine.pictureInPictureActive = true
+        #expect(!engine.closingPictureInPictureOwesBackgroundDecision(wasActive: true))
     }
 
     @Test("state and duration changes invalidate quietly, and a released source is not retained",
