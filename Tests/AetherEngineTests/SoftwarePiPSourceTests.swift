@@ -140,7 +140,7 @@ struct SoftwarePiPTransportTests {
         var value: (paused: Bool, range: CMTimeRange)? { lock.lock(); defer { lock.unlock() }; return stored }
     }
 
-    @Test("delegate getters answer from a background queue while the main thread is busy",
+    @Test("delegate getters answer from a background thread while the main thread is busy",
           .enabled(if: SoftwarePiPTransportTests.pipSupported, "PiP is not supported on this host"))
     func gettersOffMainDoNotBlock() throws {
         let engine = try AetherEngine()
@@ -150,13 +150,15 @@ struct SoftwarePiPTransportTests {
 
         let answers = Answers()
         let finished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        // A dedicated thread rather than a global queue: its start does not depend on the capacity of
+        // the shared pool, which the rest of the suite can hold for longer than the wait below.
+        Thread {
             delegate.pictureInPictureController(controller, setPlaying: false)
             answers.set(
                 paused: delegate.pictureInPictureControllerIsPlaybackPaused(controller),
                 range: delegate.pictureInPictureControllerTimeRangeForPlayback(controller))
             finished.signal()
-        }
+        }.start()
         // This test runs on the main thread and holds it here: a getter that waited on main would
         // never finish inside the budget.
         let outcome = finished.wait(timeout: .now() + 5)
