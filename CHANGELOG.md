@@ -29,6 +29,12 @@ the public-API contract.
   (`resizeAspect`, `resize`) or its aspect-fill rectangle clipped by the view (`resizeAspectFill`), and
   returns to the full view afterwards. A `videoGravity` change during PiP re-applies it at once. A host
   that mounts `softwarePiPSource.layer` in its own view sizes the layer itself.
+- **macOS: the software layer fits the system PiP window.** While PiP is active the layer is laid out at the
+  window's size (found through public AppKit and followed on resize; the picture-shaped layout stays when no window is
+  found), so the layer's `videoGravity` fits the picture. The system draws an opaque bar over the top of that
+  window for sample-buffer sources, which no public API removes (Apple FB22411168).
+- **`SoftwarePiPSource.isSupported`** says whether the system offers PiP at all; the controller helper returns
+  nil when it is false.
 - **The PiP source keeps its off-main snapshot fresh without the controller helper**, so a host using
   `playbackDelegate` with its own content source gets current state and duration.
 
