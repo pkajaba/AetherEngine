@@ -89,7 +89,7 @@ final class DocumentedConstantsTests: XCTestCase {
                        0.036, accuracy: 1e-9)
 
         assertDocumented("once K = 3 newer base-layer", fel)
-        assertDocumented("(`maxLayerSkewFrames`) is the maximum layer", fel)
+        assertDocumented("skew, 3, and is the whole rule", fel)
         assertDocumented("waiting enhancement frames capped at 10", fel)
         assertDocumented("At most 10 enhancement frames wait", fel)
         assertDocumented("fixed capacity 32", fel)
@@ -105,6 +105,41 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("for at most about 36 ms", fel)
         assertDocumented("Counters feed a 1 Hz summary", fel)
         _ = docs
+    }
+
+    /// The deadline rule's bounds (docs/dolby-vision-fel.md §5.5) and the totals interval (§5.11). Each figure is quoted in prose there
+    /// and the code owns it: a margin, a grace or a wall bound that moves without its sentence leaves
+    /// the explanation of a late enhancement layer plausible and wrong.
+    func testDeadlineRuleBoundsMatchDocumentation() throws {
+        let fel = try felDocument()
+        XCTAssertEqual(DualLayerVideoDecoder.deadlineMarginFloor, 0.1)
+        XCTAssertEqual(DualLayerVideoDecoder.enhancementGraceFloor, 0.015)
+        XCTAssertEqual(DualLayerVideoDecoder.enhancementGraceCap, 0.05)
+        XCTAssertEqual(DualLayerVideoDecoder.heldClockWallBound, 2)
+        XCTAssertEqual(DualLayerVideoDecoder.maxDeadlineHoldFrames, 7)
+        XCTAssertEqual(OrderedDelivery(maxFramesInFlight: DoviFelComposer.maxFramesInFlight,
+                                       maxLayerSkew: DualLayerVideoDecoder.maxLayerSkewFrames).stallThreshold, 8)
+        XCTAssertEqual(DualLayerVideoDecoder.minSweepDelay, 0.002)
+        XCTAssertEqual(DualLayerVideoDecoder.maxSweepDelay, 0.25)
+        XCTAssertEqual(DualLayerVideoDecoder.totalsLogIntervalSeconds, 10)
+
+        assertDocumented("least 100 ms. Its presentation", fel)
+        assertDocumented("clamped to 15 to 50 ms", fel)
+        assertDocumented("it waits 2 s at most", fel)
+        assertDocumented("`maxDeadlineHoldFrames` = 7 newer arrivals", fel)
+        assertDocumented("= 8 pending frames", fel)
+        assertDocumented("every 2 to 250 ms", fel)
+        assertDocumented("sent at most every 10 s", fel)
+    }
+
+    /// The memory the deadline rule's queue can hold (dolby-vision-fel.md §5.10). Base-layer frames are
+    /// 10-bit 4:2:0 in 16-bit containers, which is 3 bytes a pixel: the composer accepts only
+    /// `420YpCbCr10BiPlanarVideoRange`. A 4K frame is about 25 MB, so seven of them are about 175 MB.
+    func testDeadlineQueueMemoryMatchesDocumentation() throws {
+        let frameBytes = Double(3840 * 2160 * 3)
+        XCTAssertEqual(Double(DualLayerVideoDecoder.maxDeadlineHoldFrames) * frameBytes / 1_000_000, 175, accuracy: 1)
+        XCTAssertEqual(Double(DualLayerVideoDecoder.maxLayerSkewFrames) * frameBytes / 1_000_000, 75, accuracy: 1)
+        assertDocumented("about 175 MB at 4K with the clock, 75 MB at K = 3", try felDocument())
     }
     #endif
 

@@ -450,8 +450,11 @@ the decoder's lock, and each call is O(K):
   instead of a pool buffer, so the output pool above is not created unless a frame is refused for in-place
   (for example a luma MMR curve). It is used when the buffer is
   IOSurface-backed, in the 10-bit biplanar video-range format (`x420`), has even dimensions with the
-  luma and half-size chroma planes the output has, and the frame's luma curve is not MMR; anything else
-  takes the pool path unchanged. Setting `AETHER_FEL_INPLACE=0` turns it off for an A/B run.
+  luma and half-size chroma planes the output has, the frame's luma curve is not MMR, and the device
+  binds the planes as `read_write` textures (`readWriteTextureSupport` is tier 2, which the 16-bit luma plane
+  needs; the chroma plane is bound as 32-bit texels, one Cb and Cr pair each, which tier 1 covers); anything
+  else takes the pool path unchanged. The in-place kernels are the pool kernels' bodies, with one `read_write`
+  binding per plane. Setting `AETHER_FEL_INPLACE=0` turns it off for an A/B run.
   - *Why no scratch buffer.* The chroma kernel reads the base-layer luma around each chroma sample
     (other threads' pixels) but only its own chroma sample. The luma kernel reads only its own luma sample.
     So chroma runs first, while all the luma is still the decoded base layer, and each thread overwrites
@@ -637,7 +640,8 @@ goes out at the default level (so a host's log carries it without a debug build)
 count of composed frames and of the base frames released by the deadline, the held-wall bound and the
 backstop. It is sent at most every 10 s and only when one of the counts moved since the last one, so a
 device run is judged from it. The software host's `[SWDiag]` line carries `skip=`, the number of frames
-the renderer skipped on arrival because the clock had already passed them, next to `lost=` and `layerDrop=`.
+the arrival-order path discarded below a seek's target. Those are the frames decoded from the start of the
+GOP the seek landed in that fall below the target, apart from `lost=`, next to `layerDrop=`.
 
 The exception is a summary whose second counted a compose failure, which goes out at the default level
 so the failure is visible without that. `os_signpost` intervals around compose and delivery make the

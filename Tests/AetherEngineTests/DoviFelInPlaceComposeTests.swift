@@ -252,6 +252,13 @@ struct DoviFelInPlaceComposeTests {
         mmr.flags.insert(.lumaMmr)
         #expect(composer.inPlaceDecision(baseBuffer: good, params: mmr) == .lumaMmr)
 
+        // The in-place kernels bind each plane as read_write: tier 2 only, so anything below it is the pool path.
+        #expect(DoviFelComposer.inPlaceRefusal(baseBuffer: good, params: params, readWriteSupported: false) == .readWriteUnsupported)
+        #expect(DoviFelComposer.inPlaceRefusal(baseBuffer: good, params: params, readWriteSupported: true) == nil)
+        #expect(DoviFelComposer.supportsInPlaceReadWrite(.tier2))
+        #expect(!DoviFelComposer.supportsInPlaceReadWrite(.tier1))
+        #expect(!DoviFelComposer.supportsInPlaceReadWrite(.tierNone))
+
         composer.inPlaceComposeEnabled = false
         #expect(composer.inPlaceDecision(baseBuffer: good, params: params) == .switchedOff)
         composer.inPlaceComposeEnabled = true

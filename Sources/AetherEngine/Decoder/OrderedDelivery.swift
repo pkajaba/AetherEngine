@@ -127,9 +127,9 @@ final class OrderedDelivery: @unchecked Sendable {
 
     /// A ticket that has waited this many frames behind the head of the line
     /// with no sign of arriving is presumed lost (dolby-vision-fel.md §5.7): sized off the
-    /// most frames that can legitimately be outstanding at once — GPU slots
-    /// plus pairing skew — with two more of margin.
-    private let stallThreshold: Int
+    /// most frames that can legitimately be outstanding at once (GPU slots
+    /// plus pairing skew), with two more of margin.
+    let stallThreshold: Int
 
     init(maxFramesInFlight: Int, maxLayerSkew: Int, label: String = "de.superuser404.dovi.delivery") {
         self.queue = DispatchQueue(label: label, qos: .userInteractive)

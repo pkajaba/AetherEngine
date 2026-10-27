@@ -445,14 +445,17 @@ constant float dovi_unorm_to_code = 65535.0f / 64.0f;
 // nearest-neighbour from the 4:2:0 plane: the reshaping model is defined on 4:4:4
 // input, and reconstructing chroma to full resolution here would cost a separate
 // pass for a case that does not occur in practice.
-kernel void dovi_compose_luma(
-    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
-    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<float, access::sample>       el_y_tex      [[texture(2)]],
-    texture2d<ushort, access::write>       out_y_tex     [[texture(3)]],
-    constant struct DoviMetalParams&       params        [[buffer(0)]],
-    constant float*                        luma_lut      [[buffer(1)]],
-    uint2                                  gid           [[thread_position_in_grid]])
+// The luma body is one template over the luma textures, so the pool kernel and the in-place kernel
+// share it: the pool kernel reads and writes two planes, the in-place kernel one read_write plane.
+template <typename YIn, typename YOut>
+static inline void dovi_compose_luma_plane(
+    YIn                                    bl_y_tex,
+    texture2d<ushort, access::read>        bl_uv_tex,
+    texture2d<float, access::sample>       el_y_tex,
+    YOut                                   out_y_tex,
+    constant struct DoviMetalParams&       params,
+    constant float*                        luma_lut,
+    uint2                                  gid)
 {
     if (gid.x >= params.bl_width || gid.y >= params.bl_height) {
         return;
@@ -499,6 +502,31 @@ kernel void dovi_compose_luma(
     out_y_tex.write(ushort4(ushort(out_y << 6), 0, 0, 0), gid);
 }
 
+kernel void dovi_compose_luma(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<float, access::sample>       el_y_tex      [[texture(2)]],
+    texture2d<ushort, access::write>       out_y_tex     [[texture(3)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    constant float*                        luma_lut      [[buffer(1)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    dovi_compose_luma_plane(bl_y_tex, bl_uv_tex, el_y_tex, out_y_tex, params, luma_lut, gid);
+}
+
+// In place (the base-layer luma plane is the output): one read_write binding, so the kernel reads
+// its own sample and writes it back through the same texture.
+kernel void dovi_compose_luma_in_place(
+    texture2d<ushort, access::read_write>  y_tex         [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<float, access::sample>       el_y_tex      [[texture(2)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    constant float*                        luma_lut      [[buffer(1)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    dovi_compose_luma_plane(y_tex, bl_uv_tex, el_y_tex, y_tex, params, luma_lut, gid);
+}
+
 /* The composed chroma at one 4:2:0 site, before quantisation, as clamped VDR codes. The 4:2:0 kernel
    writes it on its own grid; the 4:2:2 and 4:4:4 kernels take their samples from these sites, so
    every chroma format is the same composition at the 4:2:0 sites, stepped up. */
@@ -507,12 +535,37 @@ struct DoviChromaSite {
     int cr;
 };
 
+// The chroma plane is read and written through one accessor pair, so the pool kernels (16-bit
+// texels) and the in-place kernel (32-bit texels, one Cb and Cr pair each, which tier 1 binds
+// as read_write) share one body. Cb is the low half of a 32-bit texel, as in the plane's bytes.
+static inline ushort4 dovi_load_uv(texture2d<ushort, access::read> tex, uint2 p)
+{
+    return tex.read(p);
+}
+
+static inline ushort4 dovi_load_uv(texture2d<uint, access::read_write> tex, uint2 p)
+{
+    uint pair = tex.read(p).r;
+    return ushort4(ushort(pair & 0xFFFFu), ushort(pair >> 16), 0, 0);
+}
+
+static inline void dovi_store_uv(texture2d<ushort, access::write> tex, ushort4 value, uint2 p)
+{
+    tex.write(value, p);
+}
+
+static inline void dovi_store_uv(texture2d<uint, access::read_write> tex, ushort4 value, uint2 p)
+{
+    tex.write(uint4(uint(value.r) | (uint(value.g) << 16), 0u, 0u, 0u), p);
+}
+
 // Chroma: both chroma planes in one pass, since an MMR curve for Cb and for Cr
 // reads the same three base-layer components.
+template <typename UVIn>
 static inline DoviChromaSite dovi_chroma_site(
     uint2                                  site,
     texture2d<ushort, access::read>        bl_y_tex,
-    texture2d<ushort, access::read>        bl_uv_tex,
+    UVIn                                   bl_uv_tex,
     texture2d<float, access::sample>       el_uv_tex,
     constant struct DoviMetalParams        &params)
 {
@@ -538,7 +591,7 @@ static inline DoviChromaSite dovi_chroma_site(
     }
     bl_y = (bl_y + 1) >> 1;
 
-    ushort4 bl_uv = bl_uv_tex.read(site);
+    ushort4 bl_uv = dovi_load_uv(bl_uv_tex, site);
     int bl_cb = int(bl_uv.r >> 6);
     int bl_cr = int(bl_uv.g >> 6);
 
@@ -586,8 +639,9 @@ static inline DoviChromaSite dovi_chroma_site(
     return out;
 }
 
+template <typename UVOut>
 static inline void dovi_write_chroma(
-    texture2d<ushort, access::write>       out_uv_tex,
+    UVOut                                  out_uv_tex,
     uint2                                  gid,
     int                                    vdr_cb,
     int                                    vdr_cr,
@@ -599,24 +653,28 @@ static inline void dovi_write_chroma(
                                dovi_dither(gid, params.frame_index, uint2(1u, 1u)), 64, 960);
 
     if (params.dither_mode == DOVI_DEBUG_RAW_VDR) {
-        out_uv_tex.write(ushort4(ushort(vdr_cb << 4), ushort(vdr_cr << 4), 0, 0), gid);
+        dovi_store_uv(out_uv_tex, ushort4(ushort(vdr_cb << 4), ushort(vdr_cr << 4), 0, 0), gid);
         return;
     }
     if (params.dither_mode == DOVI_DITHER_FULL_PRECISION) {
-        out_uv_tex.write(ushort4(ushort(dovi_full_precision(vdr_cb, params.vdr_scale, 64, 960)),
-                                 ushort(dovi_full_precision(vdr_cr, params.vdr_scale, 64, 960)), 0, 0), gid);
+        dovi_store_uv(out_uv_tex, ushort4(ushort(dovi_full_precision(vdr_cb, params.vdr_scale, 64, 960)),
+                                          ushort(dovi_full_precision(vdr_cr, params.vdr_scale, 64, 960)), 0, 0), gid);
         return;
     }
-    out_uv_tex.write(ushort4(ushort(out_cb << 6), ushort(out_cr << 6), 0, 0), gid);
+    dovi_store_uv(out_uv_tex, ushort4(ushort(out_cb << 6), ushort(out_cr << 6), 0, 0), gid);
 }
 
-kernel void dovi_compose_chroma(
-    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
-    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
-    texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
-    constant struct DoviMetalParams&       params        [[buffer(0)]],
-    uint2                                  gid           [[thread_position_in_grid]])
+// The chroma body, shared by the pool kernel and the in-place kernel. Each thread reads its own chroma
+// sample and writes it back, and reads base-layer luma only, so the in-place write cannot reach a
+// neighbour's read.
+template <typename UVIn, typename UVOut>
+static inline void dovi_compose_chroma_plane(
+    texture2d<ushort, access::read>        bl_y_tex,
+    UVIn                                   bl_uv_tex,
+    texture2d<float, access::sample>       el_uv_tex,
+    UVOut                                  out_uv_tex,
+    constant struct DoviMetalParams&       params,
+    uint2                                  gid)
 {
     uint uv_width = (params.bl_width + 1u) / 2u;
     uint uv_height = (params.bl_height + 1u) / 2u;
@@ -627,6 +685,28 @@ kernel void dovi_compose_chroma(
 
     DoviChromaSite site = dovi_chroma_site(gid, bl_y_tex, bl_uv_tex, el_uv_tex, params);
     dovi_write_chroma(out_uv_tex, gid, site.cb, site.cr, params);
+}
+
+kernel void dovi_compose_chroma(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+    texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    dovi_compose_chroma_plane(bl_y_tex, bl_uv_tex, el_uv_tex, out_uv_tex, params, gid);
+}
+
+// In place (the base-layer chroma plane is the output): one read_write binding for the plane, as 32-bit texels.
+kernel void dovi_compose_chroma_in_place(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<uint, access::read_write>    uv_tex        [[texture(1)]],
+    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    dovi_compose_chroma_plane(bl_y_tex, uv_tex, el_uv_tex, uv_tex, params, gid);
 }
 
 // A 4:2:0 site as the output holds it: quantised and clamped to video range. The step-up kernels mean
